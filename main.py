@@ -20,7 +20,8 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
 USERS_FILE = os.getenv("USERS_FILE")
-origins = os.getenv("VERCEL_LINK")
+origins = [os.getenv("VERCEL_LINK")]
+
 
 app = FastAPI()
 

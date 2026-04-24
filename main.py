@@ -135,3 +135,14 @@ async def add_new_user(user: UserCreate, current_user: dict = Depends(get_curren
     }
     save_users(users)
     return {"message": "User created"}
+
+@app.get("/debug")
+def debug():
+    return {
+        "SECRET_KEY": SECRET_KEY,
+        "ALGORITHM": ALGORITHM,
+        "ACCESS_TOKEN_EXPIRE_MINUTES": ACCESS_TOKEN_EXPIRE_MINUTES,
+        "USERS_FILE": USERS_FILE,
+        "VERCEL_LINK": os.getenv("VERCEL_LINK"),
+        "origins": origins
+    }

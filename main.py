@@ -85,96 +85,60 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     access_token = create_access_token(data={"sub": form_data.username})
     return {"access_token": access_token, "token_type": "bearer", "is_admin": user["is_admin"]}
 
-def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, screen_column_name: str = None):
-    # Fixed Column Indices based on your exact layout
-    # A = 0 | C = 2 | O = 14 | Q = 16
+# --- HELPER FUNCTION FOR TOTALS ---
+def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO):
+    # 1. Create a deep copy to prevent Memory Slice corruption
+    df = df.copy()
+    
+    # 2. Scrub Pandas NaNs (which corrupt MS Excel XML files)
+    df = df.fillna("")
+    
     COL_A_IDX = 0
     COL_C_IDX = 2
     COL_O_IDX = 14
     COL_Q_IDX = 16
     
-    # Fallback just in case the uploaded Excel is missing columns
     if len(df.columns) <= COL_Q_IDX:
-        with pd.ExcelWriter(output_io, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Summary')
+        writer = pd.ExcelWriter(output_io, engine='xlsxwriter')
+        df.to_excel(writer, index=False, sheet_name='Summary')
+        writer.close()
         return
 
-    # Extract dynamic column names based on exact indices
-    col_c_name = df.columns[COL_C_IDX] # This targets Column C (Theatre/Screen Name)
-    col_o_name = df.columns[COL_O_IDX] # This targets Column O
-    col_q_name = df.columns[COL_Q_IDX] # This targets Column Q
+    col_c_name = df.columns[COL_C_IDX]
+    col_o_name = df.columns[COL_O_IDX]
+    col_q_name = df.columns[COL_Q_IDX]
     
-    # Safely force O and Q to be numbers so they don't concatenate as strings
+    # Force numeric conversion, setting blanks to 0
     df[col_o_name] = pd.to_numeric(df[col_o_name], errors='coerce').fillna(0)
     df[col_q_name] = pd.to_numeric(df[col_q_name], errors='coerce').fillna(0)
     
-    with pd.ExcelWriter(output_io, engine='xlsxwriter') as writer:
-        # Write the main data table
-        df.to_excel(writer, index=False, sheet_name='Summary')
-        
-        workbook = writer.book
-        worksheet = writer.sheets['Summary']
-        
-        # Start totals 2 rows below the end of the data table
-        start_row = len(df) + 2
-        
-        # Group by Column C (Theatre/Screen Name) to get the sums for O and Q
-        screen_totals = df.groupby(col_c_name)[[col_o_name, col_q_name]].sum().reset_index()
-        
-        current_row = start_row
-        
-        for index, row in screen_totals.iterrows():
-            # 1. Write the Theatre/Screen Name in Column A (Index 0)
-            worksheet.write_string(current_row, COL_A_IDX, str(row[col_c_name]))
-            
-            # 2. Write the Total for Column O in Column O (Index 14)
-            worksheet.write_number(current_row, COL_O_IDX, float(row[col_o_name]))
-            
-            # 3. Write the Total for Column Q in Column Q (Index 16)
-            worksheet.write_number(current_row, COL_Q_IDX, float(row[col_q_name]))
-            
-            current_row += 1
-            
-        # Optional: Add a Grand Total row underneath everything if there are multiple screens
-        if len(screen_totals) > 1:
-            worksheet.write_string(current_row, COL_A_IDX, "Grand Total")
-            worksheet.write_number(current_row, COL_O_IDX, float(screen_totals[col_o_name].sum()))
-            worksheet.write_number(current_row, COL_Q_IDX, float(screen_totals[col_q_name].sum()))
-    target_col_indices = [14, 16]
+    # 3. Explicit writer management
+    writer = pd.ExcelWriter(output_io, engine='xlsxwriter')
+    df.to_excel(writer, index=False, sheet_name='Summary')
     
-    target_cols = [df.columns[i] for i in target_col_indices if i < len(df.columns)]
+    workbook = writer.book
+    worksheet = writer.sheets['Summary']
     
-    with pd.ExcelWriter(output_io, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Summary')
+    start_row = len(df) + 2
+    screen_totals = df.groupby(col_c_name)[[col_o_name, col_q_name]].sum().reset_index()
+    
+    current_row = start_row
+    for index, row in screen_totals.iterrows():
+        # Ensure pure string and float types are passed to xlsxwriter
+        screen_val = str(row[col_c_name]) if str(row[col_c_name]).strip() != "" else "Unknown Screen"
         
-        workbook = writer.book
-        worksheet = writer.sheets['Summary']
+        worksheet.write_string(current_row, COL_A_IDX, screen_val)
+        worksheet.write_number(current_row, COL_O_IDX, float(row[col_o_name]))
+        worksheet.write_number(current_row, COL_Q_IDX, float(row[col_q_name]))
+        current_row += 1
         
-        start_row = len(df) + 2
+    if len(screen_totals) > 1:
+        worksheet.write_string(current_row, COL_A_IDX, "Grand Total")
+        worksheet.write_number(current_row, COL_O_IDX, float(screen_totals[col_o_name].sum()))
+        worksheet.write_number(current_row, COL_Q_IDX, float(screen_totals[col_q_name].sum()))
         
-        if screen_column_name in df.columns and target_cols:
-            screen_totals = df.groupby(screen_column_name)[target_cols].sum().reset_index()
-            
-            worksheet.write_string(start_row, 0, f"{screen_column_name} Totals")
-            
-            current_row = start_row + 1
-            
-            for index, row in screen_totals.iterrows():
-                worksheet.write_string(current_row, 0, str(row[screen_column_name]))
-                
-                for col_name in target_cols:
-                    col_pos = df.columns.get_loc(col_name)
-                    worksheet.write_number(current_row, col_pos, row[col_name])
-                    
-                current_row += 1
-            
-            grand_total_row = current_row + 1
-            worksheet.write_string(grand_total_row, 0, "Grand Total")
-            
-            for col_name in target_cols:
-                col_pos = df.columns.get_loc(col_name)
-                grand_total_val = screen_totals[col_name].sum()
-                worksheet.write_number(grand_total_row, col_pos, grand_total_val)
+    # 4. Explicitly close the file to seal the binary stream
+    writer.close()
 
 
 @app.post("/extract-theatres")
@@ -188,7 +152,6 @@ async def extract_theatres(file: UploadFile = File(...), current_user: dict = De
 async def generate_custom_excel(
     file: UploadFile = File(...),
     selected_theatres: str = Form(...),
-    screen_column_name: str = Form("Screen Name"),
     current_user: dict = Depends(get_current_user)
 ):
     theatres_list = json.loads(selected_theatres)
@@ -198,7 +161,7 @@ async def generate_custom_excel(
     filtered_df = df[df['Theatre Name'].isin(theatres_list)]
     
     output = io.BytesIO()
-    create_excel_with_totals(filtered_df, output, screen_column_name)
+    create_excel_with_totals(filtered_df, output)
     output.seek(0)
     
     return StreamingResponse(
@@ -210,7 +173,6 @@ async def generate_custom_excel(
 @app.post("/generate-all-zip")
 async def generate_all_zip(
     file: UploadFile = File(...),
-    screen_column_name: str = Form("Screen Name"),
     current_user: dict = Depends(get_current_user)
 ):
     contents = await file.read()
@@ -226,9 +188,11 @@ async def generate_all_zip(
                 continue
                 
             output = io.BytesIO()
-            create_excel_with_totals(theatre_df, output, screen_column_name)
+            create_excel_with_totals(theatre_df, output)
             
-            zipf.writestr(f"{theatre_name}_summary.xlsx", output.getvalue())
+            # Sanitize the filename to prevent ZIP corruption from illegal characters
+            safe_name = str(theatre_name).replace("/", "-").replace("\\", "-")
+            zipf.writestr(f"{safe_name}_summary.xlsx", output.getvalue())
 
     zip_buffer.seek(0)
     return StreamingResponse(

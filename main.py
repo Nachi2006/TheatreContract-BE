@@ -111,108 +111,118 @@ def read_clean_excel(contents: bytes, filename: str) -> pd.DataFrame:
     return df
 
 
+def get_excel_dates(series):
+    """
+    Converts both Excel serial dates and normal date strings
+    into pandas datetime objects.
+    """
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_datetime(
+            series,
+            unit="D",
+            origin="1899-12-30",
+            errors="coerce"
+        )
+
+    return pd.to_datetime(series, errors="coerce")
+
+
 def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third_party: bool = False):
     df = df.copy()
     max_col_idx = len(df.columns) - 1
-
-    # Preserve date/month formatting in Column A
+    
+    # Preserve month formatting in Column A
     if len(df.columns) > 0:
         first_col = df.columns[0]
-        parsed_dates = pd.to_datetime(df[first_col], errors='coerce')
+        parsed_dates = get_excel_dates(df[first_col])
+
         if parsed_dates.notna().any():
-            df[first_col] = parsed_dates.dt.strftime('%d-%b-%Y')
+            df[first_col] = parsed_dates.dt.strftime('%b-%y')
 
-    # Define columns to keep
+    # 1. Define Columns to Keep
+    # Base Keep: A(0), C(2), D(3), E(4), H(7), K(10), L(11), M(12), N(13), O(14), P(15), Q(16), R(17)
+    # Automatically drops B, F, G, I, J, S, T, U, V, Y, Z+
+    base_keep = [0, 2, 3, 4, 7, 10, 11, 12, 13, 14, 15, 16, 17]
+    
     if with_third_party:
-        # A,C,D,E,H,K,L,M,N,O,P,W,X
-        base_keep = [0, 2, 3, 4, 7, 10, 11, 12, 13, 14, 15, 22, 23]
-    else:
-        # A,C,D,E,H,K,L,M,N,O,P,Q,R
-        base_keep = [0, 2, 3, 4, 7, 10, 11, 12, 13, 14, 15, 16, 17]
-
+        # Include W(22) and X(23)
+        base_keep.extend([22, 23])
+        
     indices_to_keep = [i for i in base_keep if i <= max_col_idx]
     cols_to_keep = [df.columns[i] for i in indices_to_keep]
-
-    # Define columns to sum
+    
+    # 2. Define Columns to Sum
     if with_third_party:
-        sum_indices = [15, 23]  # P and X
+        # Sum P and X
+        sum_indices = [15, 23]
     else:
-        sum_indices = [15, 17]  # P and R
-
+        # Sum P and R
+        sum_indices = [15, 17]
+        
     valid_sum_indices = [i for i in sum_indices if i <= max_col_idx]
-
+    
+    # Force numeric conversion for target sum columns
     for i in valid_sum_indices:
         col_name = df.columns[i]
         df[col_name] = pd.to_numeric(df[col_name], errors='coerce').fillna(0)
-
+        
     df = df.fillna("")
-
     if 'Combined Name' in df.columns:
         df = df.sort_values(by='Combined Name')
-
+        
     df_out = df[cols_to_keep]
-
+    
+    # Map original indices to their new positions in the shrunken dataframe
     original_to_new_loc = {}
     for orig_idx in valid_sum_indices:
         if orig_idx in indices_to_keep:
             original_to_new_loc[orig_idx] = indices_to_keep.index(orig_idx)
-
+    
+    # Setup Writer
     writer = pd.ExcelWriter(output_io, engine='xlsxwriter')
     workbook = writer.book
-
+    
     subtotal_fmt = workbook.add_format({'bold': True, 'bg_color': '#E2EFDA'})
     summary_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9E1F2'})
-
+    
     df_out[:0].to_excel(writer, index=False, sheet_name='Summary')
     worksheet = writer.sheets['Summary']
-
+    
     current_row = 1
-
+    
     if 'Combined Name' not in df.columns:
         df['Combined Name'] = "All Data"
-
+    
+    # 3. Print Data Chunks and Screen Subtotals
     for screen_name, group in df.groupby('Combined Name', sort=False):
         group_out = group[cols_to_keep]
-
-        group_out.to_excel(
-            writer,
-            index=False,
-            header=False,
-            startrow=current_row,
-            sheet_name='Summary'
-        )
-
+        group_out.to_excel(writer, index=False, header=False, startrow=current_row, sheet_name='Summary')
         current_row += len(group_out)
-
+        
         screen_val = str(screen_name) if str(screen_name).strip() != "" else "Unknown Screen"
-
-        worksheet.write_string(
-            current_row,
-            0,
-            f"{screen_val} Subtotal",
-            subtotal_fmt
-        )
-
+        worksheet.write_string(current_row, 0, f"{screen_val} Subtotal", subtotal_fmt)
+        
+        # Drop the sums exactly under the correct pruned columns
         for orig_idx in valid_sum_indices:
             if orig_idx in original_to_new_loc:
                 new_loc = original_to_new_loc[orig_idx]
                 col_name = df.columns[orig_idx]
                 val = float(group[col_name].sum())
                 worksheet.write_number(current_row, new_loc, val, subtotal_fmt)
+                
+        current_row += 1 
 
-        current_row += 1
-
-    current_row += 2
+    # 4. Print Overall Summary at the Bottom
+    current_row += 2 
     worksheet.write_string(current_row, 0, "OVERALL SUMMARY", summary_fmt)
     current_row += 1
-
+    
     grand_totals = {orig_idx: 0.0 for orig_idx in valid_sum_indices}
-
+    
     for screen_name, group in df.groupby('Combined Name', sort=False):
         screen_val = str(screen_name) if str(screen_name).strip() != "" else "Unknown Screen"
-
         worksheet.write_string(current_row, 0, screen_val)
-
+        
         for orig_idx in valid_sum_indices:
             if orig_idx in original_to_new_loc:
                 new_loc = original_to_new_loc[orig_idx]
@@ -220,21 +230,14 @@ def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third
                 val = float(group[col_name].sum())
                 grand_totals[orig_idx] += val
                 worksheet.write_number(current_row, new_loc, val)
-
         current_row += 1
-
+        
     worksheet.write_string(current_row, 0, "Grand Total", summary_fmt)
-
     for orig_idx in valid_sum_indices:
         if orig_idx in original_to_new_loc:
             new_loc = original_to_new_loc[orig_idx]
-            worksheet.write_number(
-                current_row,
-                new_loc,
-                grand_totals[orig_idx],
-                summary_fmt
-            )
-
+            worksheet.write_number(current_row, new_loc, grand_totals[orig_idx], summary_fmt)
+            
     writer.close()
 
 
@@ -257,7 +260,7 @@ async def extract_theatres(file: UploadFile = File(...), current_user: dict = De
         # 2. Get Months from Column A (Index 0)
         months = []
         if len(df.columns) > 0:
-            df['Temp Date'] = pd.to_datetime(df.iloc[:, 0], errors='coerce')
+            df['Temp Date'] = get_excel_dates(df.iloc[:, 0])
             months = df['Temp Date'].dt.strftime('%b-%y').dropna().unique().tolist()
             months.sort(key=lambda date: datetime.strptime(date, "%b-%y"))
             
@@ -283,7 +286,7 @@ async def generate_custom_excel(
         
         # Filter by Month in Column A (0)
         if month != "All" and len(df.columns) > 0:
-            df['Temp Date'] = pd.to_datetime(df.iloc[:, 0], errors='coerce')
+            df['Temp Date'] = get_excel_dates(df.iloc[:, 0])
             df = df[df['Temp Date'].dt.strftime('%b-%y') == month]
         
         if len(df.columns) > 3:
@@ -319,7 +322,7 @@ async def generate_all_zip(
         
         # Filter by Month in Column A (0)
         if month != "All" and len(df.columns) > 0:
-            df['Temp Date'] = pd.to_datetime(df.iloc[:, 0], errors='coerce')
+            df['Temp Date'] = get_excel_dates(df.iloc[:, 0])
             df = df[df['Temp Date'].dt.strftime('%b-%y') == month]
         
         if len(df.columns) > 3:

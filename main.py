@@ -86,62 +86,90 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     return {"access_token": access_token, "token_type": "bearer", "is_admin": user["is_admin"]}
 
 
+# --- HELPER FUNCTION FOR TOTALS ---
 def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third_party: bool = False):
     df = df.copy()
     df = df.fillna("")
     
+    # Ensure minimum required columns exist
     if len(df.columns) < 19:
         writer = pd.ExcelWriter(output_io, engine='xlsxwriter')
         df.to_excel(writer, index=False, sheet_name='Summary')
         writer.close()
         return
 
-    col_o_name = df.columns[14]
-    col_q_name = df.columns[16]
-    
+    # 1. Define Columns to Keep/Drop
+    # Indices to Drop: B(1), E(4), F(5), G(6), I(8), J(9)
     indices_to_drop = [1, 4, 5, 6, 8, 9]
+    # Keep A to S (0 to 18) minus dropped
     indices_to_keep = [i for i in range(19) if i not in indices_to_drop]
     
+    # Append X(23) and Y(24) if Third Party is checked
     if with_third_party and len(df.columns) > 24:
         indices_to_keep.extend([23, 24])
         
     cols_to_keep = [df.columns[i] for i in indices_to_keep]
     
-    df[col_o_name] = pd.to_numeric(df[col_o_name], errors='coerce').fillna(0)
-    df[col_q_name] = pd.to_numeric(df[col_q_name], errors='coerce').fillna(0)
+    # 2. Define exactly which columns to sum: P(15), R(17), S(18) | And X(23), Y(24)
+    sum_indices = [15, 17, 18]
+    if with_third_party and len(df.columns) > 24:
+        sum_indices.extend([23, 24])
+        
+    sum_cols = [df.columns[i] for i in sum_indices if i < len(df.columns)]
     
+    # Force numeric conversion on the exact sum columns
+    for col in sum_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
+    # Sort DataFrame by the injected 'Combined Name'
     df = df.sort_values(by='Combined Name')
     
+    # Create the output dataframe with dropped columns
     df_out = df[cols_to_keep]
     
-    new_col_o_idx = df_out.columns.get_loc(col_o_name)
-    new_col_q_idx = df_out.columns.get_loc(col_q_name)
+    # Scrub "Unnamed:" headers caused by pd.read_excel on merged rows
+    cleaned_headers = [c if not str(c).startswith("Unnamed:") else "" for c in df_out.columns]
+    df_out.columns = cleaned_headers
     
+    # Re-map our sum columns to their cleaned header names so we can find them
+    cleaned_sum_cols = [c if not str(c).startswith("Unnamed:") else "" for c in sum_cols]
+    
+    # Find the NEW indices of the sum columns in the pruned dataframe
+    new_sum_locs = {col: df_out.columns.get_loc(col) for col in cleaned_sum_cols}
+    
+    # Setup Writer
     writer = pd.ExcelWriter(output_io, engine='xlsxwriter')
     workbook = writer.book
     
     subtotal_fmt = workbook.add_format({'bold': True, 'bg_color': '#E2EFDA'})
     summary_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9E1F2'})
     
+    # Print Headers
     df_out[:0].to_excel(writer, index=False, sheet_name='Summary')
     worksheet = writer.sheets['Summary']
     
     current_row = 1
     
+    # 3. Iterate and print Chunks by 'Combined Name'
     for screen_name, group in df.groupby('Combined Name', sort=False):
         group_out = group[cols_to_keep]
         group_out.to_excel(writer, index=False, header=False, startrow=current_row, sheet_name='Summary')
         current_row += len(group_out)
         
+        # Subtotals row
         screen_val = str(screen_name) if str(screen_name).strip() != "" else "Unknown Screen"
         worksheet.write_string(current_row, 0, f"{screen_val} Subtotal", subtotal_fmt)
-        worksheet.write_number(current_row, new_col_o_idx, float(group[col_o_name].sum()), subtotal_fmt)
-        worksheet.write_number(current_row, new_col_q_idx, float(group[col_q_name].sum()), subtotal_fmt)
         
+        # Inject the math for each specific sum column
+        for original_col, cleaned_col in zip(sum_cols, cleaned_sum_cols):
+            loc = new_sum_locs[cleaned_col]
+            worksheet.write_number(current_row, loc, float(group[original_col].sum()), subtotal_fmt)
+            
         current_row += 1 
 
+    # 4. Overall Summary at the Bottom
     current_row += 2 
-    screen_totals = df.groupby('Combined Name')[[col_o_name, col_q_name]].sum().reset_index()
+    screen_totals = df.groupby('Combined Name')[sum_cols].sum().reset_index()
     
     worksheet.write_string(current_row, 0, "OVERALL SUMMARY", summary_fmt)
     current_row += 1
@@ -149,14 +177,18 @@ def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third
     for index, row in screen_totals.iterrows():
         screen_val = str(row['Combined Name'])
         worksheet.write_string(current_row, 0, screen_val)
-        worksheet.write_number(current_row, new_col_o_idx, float(row[col_o_name]))
-        worksheet.write_number(current_row, new_col_q_idx, float(row[col_q_name]))
+        
+        for original_col, cleaned_col in zip(sum_cols, cleaned_sum_cols):
+            loc = new_sum_locs[cleaned_col]
+            worksheet.write_number(current_row, loc, float(row[original_col]))
+            
         current_row += 1
         
     if len(screen_totals) > 1:
         worksheet.write_string(current_row, 0, "Grand Total", summary_fmt)
-        worksheet.write_number(current_row, new_col_o_idx, float(screen_totals[col_o_name].sum()), summary_fmt)
-        worksheet.write_number(current_row, new_col_q_idx, float(screen_totals[col_q_name].sum()), summary_fmt)
+        for original_col, cleaned_col in zip(sum_cols, cleaned_sum_cols):
+            loc = new_sum_locs[cleaned_col]
+            worksheet.write_number(current_row, loc, float(screen_totals[original_col].sum()), summary_fmt)
         
     writer.close()
 
@@ -169,6 +201,7 @@ async def extract_theatres(file: UploadFile = File(...), current_user: dict = De
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), header=3, engine=engine_choice)
     
+    # Create D + C combination (Screen Name + Screen Code)
     if len(df.columns) > 3:
         df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)
         theatres = df['Combined Name'].dropna().unique().tolist()

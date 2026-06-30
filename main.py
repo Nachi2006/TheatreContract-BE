@@ -86,7 +86,6 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     return {"access_token": access_token, "token_type": "bearer", "is_admin": user["is_admin"]}
 
 
-# --- HELPER FUNCTION FOR TOTALS ---
 def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third_party: bool = False):
     df = df.copy()
     df = df.fillna("")
@@ -160,7 +159,7 @@ def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third
         screen_val = str(screen_name) if str(screen_name).strip() != "" else "Unknown Screen"
         worksheet.write_string(current_row, 0, f"{screen_val} Subtotal", subtotal_fmt)
         
-        # Inject the math for each specific sum column
+        # Inject the math for each specific sum column dynamically
         for original_col, cleaned_col in zip(sum_cols, cleaned_sum_cols):
             loc = new_sum_locs[cleaned_col]
             worksheet.write_number(current_row, loc, float(group[original_col].sum()), subtotal_fmt)
@@ -201,7 +200,7 @@ async def extract_theatres(file: UploadFile = File(...), current_user: dict = De
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), header=3, engine=engine_choice)
     
-    # Create D + C combination (Screen Name + Screen Code)
+    # 1. Get Theatres (Screen Name + Screen Code)
     if len(df.columns) > 3:
         df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)
         theatres = df['Combined Name'].dropna().unique().tolist()
@@ -209,7 +208,16 @@ async def extract_theatres(file: UploadFile = File(...), current_user: dict = De
     else:
         theatres = []
         
-    return {"theatres": theatres}
+    # 2. Get Months from "Invoice Date" (Usually Column I / index 8)
+    months = []
+    if len(df.columns) > 8:
+        invoice_col = df.columns[8]
+        df['Temp Date'] = pd.to_datetime(df[invoice_col], errors='coerce')
+        months = df['Temp Date'].dt.strftime('%b-%y').dropna().unique().tolist()
+        # Sort chronologically
+        months.sort(key=lambda date: datetime.strptime(date, "%b-%y"))
+        
+    return {"theatres": theatres, "months": months}
 
 
 @app.post("/generate-custom-excel")
@@ -217,6 +225,7 @@ async def generate_custom_excel(
     file: UploadFile = File(...),
     selected_theatres: str = Form(...),
     with_third_party: str = Form("false"),
+    month: str = Form("All"),
     current_user: dict = Depends(get_current_user)
 ):
     file_ext = os.path.splitext(file.filename)[1].lower()
@@ -227,6 +236,12 @@ async def generate_custom_excel(
     
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), header=3, engine=engine_choice)
+    
+    # Filter by Month if not "All"
+    if month != "All" and len(df.columns) > 8:
+        invoice_col = df.columns[8]
+        df['Temp Date'] = pd.to_datetime(df[invoice_col], errors='coerce')
+        df = df[df['Temp Date'].dt.strftime('%b-%y') == month]
     
     if len(df.columns) > 3:
         df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)
@@ -249,6 +264,7 @@ async def generate_custom_excel(
 async def generate_all_zip(
     file: UploadFile = File(...),
     with_third_party: str = Form("false"),
+    month: str = Form("All"),
     current_user: dict = Depends(get_current_user)
 ):
     file_ext = os.path.splitext(file.filename)[1].lower()
@@ -258,6 +274,12 @@ async def generate_all_zip(
     
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), header=3, engine=engine_choice)
+    
+    # Filter by Month if not "All"
+    if month != "All" and len(df.columns) > 8:
+        invoice_col = df.columns[8]
+        df['Temp Date'] = pd.to_datetime(df[invoice_col], errors='coerce')
+        df = df[df['Temp Date'].dt.strftime('%b-%y') == month]
     
     if len(df.columns) > 3:
         df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)

@@ -87,84 +87,93 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 
 # --- HELPER FUNCTION FOR TOTALS ---
-def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO):
-    # 1. Create a deep copy and scrub NaNs to prevent corruption
+def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third_party: bool = False):
     df = df.copy()
     df = df.fillna("")
     
-    COL_A_IDX = 0
-    COL_C_IDX = 2
-    COL_O_IDX = 14
-    COL_Q_IDX = 16
-    
-    # Sort DataFrame Alphabetically by Theatre Name
-    if len(df.columns) > COL_C_IDX:
-        col_c_name = df.columns[COL_C_IDX]
-        df = df.sort_values(by=col_c_name)
-
-    # Fallback if columns are missing
-    if len(df.columns) <= COL_Q_IDX:
+    # Ensure minimum required columns exist
+    if len(df.columns) < 19:
         writer = pd.ExcelWriter(output_io, engine='xlsxwriter')
         df.to_excel(writer, index=False, sheet_name='Summary')
         writer.close()
         return
 
-    col_c_name = df.columns[COL_C_IDX]
-    col_o_name = df.columns[COL_O_IDX]
-    col_q_name = df.columns[COL_Q_IDX]
+    # Extract exact names for O (14) and Q (16) before dropping columns
+    col_o_name = df.columns[14]
+    col_q_name = df.columns[16]
     
-    # Force numeric conversion for O and Q columns
+    # 1. Define Columns to Keep/Drop based on request
+    # Indices to Drop: B(1), E(4), F(5), G(6), I(8), J(9)
+    indices_to_drop = [1, 4, 5, 6, 8, 9]
+    # Keep A to S (0 to 18) minus dropped
+    indices_to_keep = [i for i in range(19) if i not in indices_to_drop]
+    
+    # Append X(23) and Y(24) if Third Party is checked and they exist
+    if with_third_party and len(df.columns) > 24:
+        indices_to_keep.extend([23, 24])
+        
+    cols_to_keep = [df.columns[i] for i in indices_to_keep]
+    
+    # Force numeric conversion for O and Q
     df[col_o_name] = pd.to_numeric(df[col_o_name], errors='coerce').fillna(0)
     df[col_q_name] = pd.to_numeric(df[col_q_name], errors='coerce').fillna(0)
     
-    # 2. Setup Explicit Writer & Styles
+    # Sort DataFrame by the injected 'Combined Name'
+    df = df.sort_values(by='Combined Name')
+    
+    # Create the output dataframe with dropped columns
+    df_out = df[cols_to_keep]
+    
+    # Find the NEW indices of O and Q so subtotals align perfectly under them
+    new_col_o_idx = df_out.columns.get_loc(col_o_name)
+    new_col_q_idx = df_out.columns.get_loc(col_q_name)
+    
+    # Setup Writer
     writer = pd.ExcelWriter(output_io, engine='xlsxwriter')
     workbook = writer.book
     
-    subtotal_fmt = workbook.add_format({'bold': True, 'bg_color': '#E2EFDA'}) # Light Green
-    summary_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9E1F2'})  # Light Blue
+    subtotal_fmt = workbook.add_format({'bold': True, 'bg_color': '#E2EFDA'})
+    summary_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9E1F2'})
     
-    # Write ONLY the headers first (Row 0)
-    df[:0].to_excel(writer, index=False, sheet_name='Summary')
+    # Print Headers
+    df_out[:0].to_excel(writer, index=False, sheet_name='Summary')
     worksheet = writer.sheets['Summary']
     
     current_row = 1
     
-    # 3. Write Data Chunk by Chunk (Separated by Screen)
-    for screen_name, group in df.groupby(col_c_name, sort=False):
-        # Dump the group's rows without printing the header again
-        group.to_excel(writer, index=False, header=False, startrow=current_row, sheet_name='Summary')
-        current_row += len(group)
+    # 2. Iterate and print Chunks by 'Combined Name'
+    for screen_name, group in df.groupby('Combined Name', sort=False):
+        group_out = group[cols_to_keep]
+        group_out.to_excel(writer, index=False, header=False, startrow=current_row, sheet_name='Summary')
+        current_row += len(group_out)
         
-        # Calculate & Insert Subtotal directly beneath the chunk
+        # Subtotals directly below O and Q
         screen_val = str(screen_name) if str(screen_name).strip() != "" else "Unknown Screen"
-        worksheet.write_string(current_row, COL_A_IDX, f"{screen_val} Subtotal", subtotal_fmt)
-        worksheet.write_number(current_row, COL_O_IDX, float(group[col_o_name].sum()), subtotal_fmt)
-        worksheet.write_number(current_row, COL_Q_IDX, float(group[col_q_name].sum()), subtotal_fmt)
+        worksheet.write_string(current_row, 0, f"{screen_val} Subtotal", subtotal_fmt)
+        worksheet.write_number(current_row, new_col_o_idx, float(group[col_o_name].sum()), subtotal_fmt)
+        worksheet.write_number(current_row, new_col_q_idx, float(group[col_q_name].sum()), subtotal_fmt)
         
         current_row += 1 
 
-    # 4. Write Overall Summary at the Bottom
-    current_row += 2 # Leave a visual gap before the summary
+    # 3. Overall Summary at the Bottom
+    current_row += 2 
+    screen_totals = df.groupby('Combined Name')[[col_o_name, col_q_name]].sum().reset_index()
     
-    screen_totals = df.groupby(col_c_name)[[col_o_name, col_q_name]].sum().reset_index()
-    
-    worksheet.write_string(current_row, COL_A_IDX, "OVERALL SUMMARY", summary_fmt)
+    worksheet.write_string(current_row, 0, "OVERALL SUMMARY", summary_fmt)
     current_row += 1
     
     for index, row in screen_totals.iterrows():
-        screen_val = str(row[col_c_name]) if str(row[col_c_name]).strip() != "" else "Unknown Screen"
-        worksheet.write_string(current_row, COL_A_IDX, screen_val)
-        worksheet.write_number(current_row, COL_O_IDX, float(row[col_o_name]))
-        worksheet.write_number(current_row, COL_Q_IDX, float(row[col_q_name]))
+        screen_val = str(row['Combined Name'])
+        worksheet.write_string(current_row, 0, screen_val)
+        worksheet.write_number(current_row, new_col_o_idx, float(row[col_o_name]))
+        worksheet.write_number(current_row, new_col_q_idx, float(row[col_q_name]))
         current_row += 1
         
     if len(screen_totals) > 1:
-        worksheet.write_string(current_row, COL_A_IDX, "Grand Total", summary_fmt)
-        worksheet.write_number(current_row, COL_O_IDX, float(screen_totals[col_o_name].sum()), summary_fmt)
-        worksheet.write_number(current_row, COL_Q_IDX, float(screen_totals[col_q_name].sum()), summary_fmt)
+        worksheet.write_string(current_row, 0, "Grand Total", summary_fmt)
+        worksheet.write_number(current_row, new_col_o_idx, float(screen_totals[col_o_name].sum()), summary_fmt)
+        worksheet.write_number(current_row, new_col_q_idx, float(screen_totals[col_q_name].sum()), summary_fmt)
         
-    # 5. Seal binary stream
     writer.close()
 
 
@@ -172,8 +181,15 @@ def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO):
 async def extract_theatres(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), header=3)
-    theatres = df['Theatre Name'].dropna().unique().tolist()
-    theatres.sort()
+    
+    # Create D + C combination
+    if len(df.columns) > 3:
+        df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)
+        theatres = df['Combined Name'].dropna().unique().tolist()
+        theatres.sort()
+    else:
+        theatres = []
+        
     return {"theatres": theatres}
 
 
@@ -181,16 +197,23 @@ async def extract_theatres(file: UploadFile = File(...), current_user: dict = De
 async def generate_custom_excel(
     file: UploadFile = File(...),
     selected_theatres: str = Form(...),
+    with_third_party: str = Form("false"),
     current_user: dict = Depends(get_current_user)
 ):
+    is_third_party = with_third_party.lower() == "true"
     theatres_list = json.loads(selected_theatres)
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), header=3)
     
-    filtered_df = df[df['Theatre Name'].isin(theatres_list)]
+    # Attach Combined Name for Filtering
+    if len(df.columns) > 3:
+        df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)
+        filtered_df = df[df['Combined Name'].isin(theatres_list)]
+    else:
+        filtered_df = df
     
     output = io.BytesIO()
-    create_excel_with_totals(filtered_df, output)
+    create_excel_with_totals(filtered_df, output, is_third_party)
     output.seek(0)
     
     return StreamingResponse(
@@ -203,22 +226,30 @@ async def generate_custom_excel(
 @app.post("/generate-all-zip")
 async def generate_all_zip(
     file: UploadFile = File(...),
+    with_third_party: str = Form("false"),
     current_user: dict = Depends(get_current_user)
 ):
+    is_third_party = with_third_party.lower() == "true"
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), header=3)
+    
+    if len(df.columns) > 3:
+        df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)
+        unique_theatres = df['Combined Name'].dropna().unique()
+    else:
+        unique_theatres = []
     
     zip_buffer = io.BytesIO()
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for theatre_name in df['Theatre Name'].dropna().unique():
-            theatre_df = df[df['Theatre Name'] == theatre_name]
+        for theatre_name in unique_theatres:
+            theatre_df = df[df['Combined Name'] == theatre_name]
             
             if theatre_df.empty:
                 continue
                 
             output = io.BytesIO()
-            create_excel_with_totals(theatre_df, output)
+            create_excel_with_totals(theatre_df, output, is_third_party)
             
             safe_name = str(theatre_name).replace("/", "-").replace("\\", "-")
             zipf.writestr(f"{safe_name}_summary.xlsx", output.getvalue())

@@ -86,68 +86,53 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     return {"access_token": access_token, "token_type": "bearer", "is_admin": user["is_admin"]}
 
 
-# --- HELPER FUNCTION FOR TOTALS ---
 def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third_party: bool = False):
     df = df.copy()
     df = df.fillna("")
     
-    # Ensure minimum required columns exist
     if len(df.columns) < 19:
         writer = pd.ExcelWriter(output_io, engine='xlsxwriter')
         df.to_excel(writer, index=False, sheet_name='Summary')
         writer.close()
         return
 
-    # Extract exact names for O (14) and Q (16) before dropping columns
     col_o_name = df.columns[14]
     col_q_name = df.columns[16]
     
-    # 1. Define Columns to Keep/Drop based on request
-    # Indices to Drop: B(1), E(4), F(5), G(6), I(8), J(9)
     indices_to_drop = [1, 4, 5, 6, 8, 9]
-    # Keep A to S (0 to 18) minus dropped
     indices_to_keep = [i for i in range(19) if i not in indices_to_drop]
     
-    # Append X(23) and Y(24) if Third Party is checked and they exist
     if with_third_party and len(df.columns) > 24:
         indices_to_keep.extend([23, 24])
         
     cols_to_keep = [df.columns[i] for i in indices_to_keep]
     
-    # Force numeric conversion for O and Q
     df[col_o_name] = pd.to_numeric(df[col_o_name], errors='coerce').fillna(0)
     df[col_q_name] = pd.to_numeric(df[col_q_name], errors='coerce').fillna(0)
     
-    # Sort DataFrame by the injected 'Combined Name'
     df = df.sort_values(by='Combined Name')
     
-    # Create the output dataframe with dropped columns
     df_out = df[cols_to_keep]
     
-    # Find the NEW indices of O and Q so subtotals align perfectly under them
     new_col_o_idx = df_out.columns.get_loc(col_o_name)
     new_col_q_idx = df_out.columns.get_loc(col_q_name)
     
-    # Setup Writer
     writer = pd.ExcelWriter(output_io, engine='xlsxwriter')
     workbook = writer.book
     
     subtotal_fmt = workbook.add_format({'bold': True, 'bg_color': '#E2EFDA'})
     summary_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9E1F2'})
     
-    # Print Headers
     df_out[:0].to_excel(writer, index=False, sheet_name='Summary')
     worksheet = writer.sheets['Summary']
     
     current_row = 1
     
-    # 2. Iterate and print Chunks by 'Combined Name'
     for screen_name, group in df.groupby('Combined Name', sort=False):
         group_out = group[cols_to_keep]
         group_out.to_excel(writer, index=False, header=False, startrow=current_row, sheet_name='Summary')
         current_row += len(group_out)
         
-        # Subtotals directly below O and Q
         screen_val = str(screen_name) if str(screen_name).strip() != "" else "Unknown Screen"
         worksheet.write_string(current_row, 0, f"{screen_val} Subtotal", subtotal_fmt)
         worksheet.write_number(current_row, new_col_o_idx, float(group[col_o_name].sum()), subtotal_fmt)
@@ -155,7 +140,6 @@ def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third
         
         current_row += 1 
 
-    # 3. Overall Summary at the Bottom
     current_row += 2 
     screen_totals = df.groupby('Combined Name')[[col_o_name, col_q_name]].sum().reset_index()
     
@@ -179,10 +163,12 @@ def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, with_third
 
 @app.post("/extract-theatres")
 async def extract_theatres(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
-    contents = await file.read()
-    df = pd.read_excel(io.BytesIO(contents), header=3)
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    engine_choice = 'pyxlsb' if file_ext == '.xlsb' else None
     
-    # Create D + C combination
+    contents = await file.read()
+    df = pd.read_excel(io.BytesIO(contents), header=3, engine=engine_choice)
+    
     if len(df.columns) > 3:
         df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)
         theatres = df['Combined Name'].dropna().unique().tolist()
@@ -200,12 +186,15 @@ async def generate_custom_excel(
     with_third_party: str = Form("false"),
     current_user: dict = Depends(get_current_user)
 ):
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    engine_choice = 'pyxlsb' if file_ext == '.xlsb' else None
+    
     is_third_party = with_third_party.lower() == "true"
     theatres_list = json.loads(selected_theatres)
-    contents = await file.read()
-    df = pd.read_excel(io.BytesIO(contents), header=3)
     
-    # Attach Combined Name for Filtering
+    contents = await file.read()
+    df = pd.read_excel(io.BytesIO(contents), header=3, engine=engine_choice)
+    
     if len(df.columns) > 3:
         df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)
         filtered_df = df[df['Combined Name'].isin(theatres_list)]
@@ -229,9 +218,13 @@ async def generate_all_zip(
     with_third_party: str = Form("false"),
     current_user: dict = Depends(get_current_user)
 ):
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    engine_choice = 'pyxlsb' if file_ext == '.xlsb' else None
+    
     is_third_party = with_third_party.lower() == "true"
+    
     contents = await file.read()
-    df = pd.read_excel(io.BytesIO(contents), header=3)
+    df = pd.read_excel(io.BytesIO(contents), header=3, engine=engine_choice)
     
     if len(df.columns) > 3:
         df['Combined Name'] = df.iloc[:, 3].astype(str) + " - " + df.iloc[:, 2].astype(str)

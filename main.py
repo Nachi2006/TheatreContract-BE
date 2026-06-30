@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -21,7 +21,6 @@ ALGORITHM = os.getenv("ALGORITHM")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
 USERS_FILE = os.getenv("USERS_FILE")
 origins = [os.getenv("VERCEL_LINK")]
-
 
 app = FastAPI()
 
@@ -86,8 +85,80 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     access_token = create_access_token(data={"sub": form_data.username})
     return {"access_token": access_token, "token_type": "bearer", "is_admin": user["is_admin"]}
 
-@app.post("/process-zip")
-async def process_zip(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, screen_column_name: str):
+    target_col_indices = [14, 16]
+    
+    target_cols = [df.columns[i] for i in target_col_indices if i < len(df.columns)]
+    
+    with pd.ExcelWriter(output_io, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Summary')
+        
+        workbook = writer.book
+        worksheet = writer.sheets['Summary']
+        
+        start_row = len(df) + 2
+        
+        if screen_column_name in df.columns and target_cols:
+            screen_totals = df.groupby(screen_column_name)[target_cols].sum().reset_index()
+            
+            worksheet.write_string(start_row, 0, f"{screen_column_name} Totals")
+            
+            current_row = start_row + 1
+            
+            for index, row in screen_totals.iterrows():
+                worksheet.write_string(current_row, 0, str(row[screen_column_name]))
+                
+                for col_name in target_cols:
+                    col_pos = df.columns.get_loc(col_name)
+                    worksheet.write_number(current_row, col_pos, row[col_name])
+                    
+                current_row += 1
+            
+            grand_total_row = current_row + 1
+            worksheet.write_string(grand_total_row, 0, "Grand Total")
+            
+            for col_name in target_cols:
+                col_pos = df.columns.get_loc(col_name)
+                grand_total_val = screen_totals[col_name].sum()
+                worksheet.write_number(grand_total_row, col_pos, grand_total_val)
+
+
+@app.post("/extract-theatres")
+async def extract_theatres(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    contents = await file.read()
+    df = pd.read_excel(io.BytesIO(contents), header=3)
+    theatres = df['Theatre Name'].dropna().unique().tolist()
+    return {"theatres": theatres}
+
+@app.post("/generate-custom-excel")
+async def generate_custom_excel(
+    file: UploadFile = File(...),
+    selected_theatres: str = Form(...),
+    screen_column_name: str = Form("Screen Name"),
+    current_user: dict = Depends(get_current_user)
+):
+    theatres_list = json.loads(selected_theatres)
+    contents = await file.read()
+    df = pd.read_excel(io.BytesIO(contents), header=3)
+    
+    filtered_df = df[df['Theatre Name'].isin(theatres_list)]
+    
+    output = io.BytesIO()
+    create_excel_with_totals(filtered_df, output, screen_column_name)
+    output.seek(0)
+    
+    return StreamingResponse(
+        output, 
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=selected_theatres_summary.xlsx"}
+    )
+
+@app.post("/generate-all-zip")
+async def generate_all_zip(
+    file: UploadFile = File(...),
+    screen_column_name: str = Form("Screen Name"),
+    current_user: dict = Depends(get_current_user)
+):
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), header=3)
     
@@ -96,17 +167,22 @@ async def process_zip(file: UploadFile = File(...), current_user: dict = Depends
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for theatre_name in df['Theatre Name'].dropna().unique():
             theatre_df = df[df['Theatre Name'] == theatre_name]
+            
+            if theatre_df.empty:
+                continue
+                
             output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                theatre_df.to_excel(writer, index=False)
-            zipf.writestr(f"{theatre_name}.xlsx", output.getvalue())
+            create_excel_with_totals(theatre_df, output, screen_column_name)
+            
+            zipf.writestr(f"{theatre_name}_summary.xlsx", output.getvalue())
 
     zip_buffer.seek(0)
     return StreamingResponse(
         zip_buffer, 
         media_type="application/x-zip-compressed",
-        headers={"Content-Disposition": "attachment; filename=all_theatres.zip"}
+        headers={"Content-Disposition": "attachment; filename=all_theatres_summary.zip"}
     )
+
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}

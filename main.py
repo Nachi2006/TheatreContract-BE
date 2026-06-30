@@ -85,7 +85,61 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     access_token = create_access_token(data={"sub": form_data.username})
     return {"access_token": access_token, "token_type": "bearer", "is_admin": user["is_admin"]}
 
-def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, screen_column_name: str):
+def create_excel_with_totals(df: pd.DataFrame, output_io: io.BytesIO, screen_column_name: str = None):
+    # Fixed Column Indices based on your exact layout
+    # A = 0 | C = 2 | O = 14 | Q = 16
+    COL_A_IDX = 0
+    COL_C_IDX = 2
+    COL_O_IDX = 14
+    COL_Q_IDX = 16
+    
+    # Fallback just in case the uploaded Excel is missing columns
+    if len(df.columns) <= COL_Q_IDX:
+        with pd.ExcelWriter(output_io, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Summary')
+        return
+
+    # Extract dynamic column names based on exact indices
+    col_c_name = df.columns[COL_C_IDX] # This targets Column C (Theatre/Screen Name)
+    col_o_name = df.columns[COL_O_IDX] # This targets Column O
+    col_q_name = df.columns[COL_Q_IDX] # This targets Column Q
+    
+    # Safely force O and Q to be numbers so they don't concatenate as strings
+    df[col_o_name] = pd.to_numeric(df[col_o_name], errors='coerce').fillna(0)
+    df[col_q_name] = pd.to_numeric(df[col_q_name], errors='coerce').fillna(0)
+    
+    with pd.ExcelWriter(output_io, engine='xlsxwriter') as writer:
+        # Write the main data table
+        df.to_excel(writer, index=False, sheet_name='Summary')
+        
+        workbook = writer.book
+        worksheet = writer.sheets['Summary']
+        
+        # Start totals 2 rows below the end of the data table
+        start_row = len(df) + 2
+        
+        # Group by Column C (Theatre/Screen Name) to get the sums for O and Q
+        screen_totals = df.groupby(col_c_name)[[col_o_name, col_q_name]].sum().reset_index()
+        
+        current_row = start_row
+        
+        for index, row in screen_totals.iterrows():
+            # 1. Write the Theatre/Screen Name in Column A (Index 0)
+            worksheet.write_string(current_row, COL_A_IDX, str(row[col_c_name]))
+            
+            # 2. Write the Total for Column O in Column O (Index 14)
+            worksheet.write_number(current_row, COL_O_IDX, float(row[col_o_name]))
+            
+            # 3. Write the Total for Column Q in Column Q (Index 16)
+            worksheet.write_number(current_row, COL_Q_IDX, float(row[col_q_name]))
+            
+            current_row += 1
+            
+        # Optional: Add a Grand Total row underneath everything if there are multiple screens
+        if len(screen_totals) > 1:
+            worksheet.write_string(current_row, COL_A_IDX, "Grand Total")
+            worksheet.write_number(current_row, COL_O_IDX, float(screen_totals[col_o_name].sum()))
+            worksheet.write_number(current_row, COL_Q_IDX, float(screen_totals[col_q_name].sum()))
     target_col_indices = [14, 16]
     
     target_cols = [df.columns[i] for i in target_col_indices if i < len(df.columns)]
